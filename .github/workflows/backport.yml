@@ -1,0 +1,108 @@
+name: Backport
+
+on:
+  pull_request_target:
+    types: [closed, labeled]
+
+jobs:
+  backport:
+    # Run only if PR is merged AND has a backport label
+    if: |
+      github.event.pull_request.merged == true && 
+      contains(toJSON(github.event.pull_request.labels.*.name), 'backport ')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract target branch from label
+        id: extract
+        run: |
+          # For 'labeled' event, use the label that was just added
+          # For 'closed' event, find any backport label
+          if [[ "${{ github.event.action }}" == "labeled" ]]; then
+            LABEL="${{ github.event.label.name }}"
+          else
+            LABEL=$(echo '${{ toJSON(github.event.pull_request.labels.*.name) }}' | jq -r '.[] | select(startswith("backport "))' | head -1)
+          fi
+          
+          TARGET_BRANCH="${LABEL#backport }"
+          echo "target_branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+          echo "Backporting to: $TARGET_BRANCH"
+
+      - name: Create backport branch and cherry-pick
+        id: backport
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          TARGET="${{ steps.extract.outputs.target_branch }}"
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          
+          # Create backport branch name (replace / with - for branch naming)
+          BACKPORT_BRANCH="backport/${PR_NUMBER}-to-${TARGET//\//-}"
+          
+          # Fetch and checkout target branch
+          git fetch origin "$TARGET"
+          git checkout -b "$BACKPORT_BRANCH" "origin/$TARGET"
+          
+          # Cherry-pick the merge commit
+          echo "Cherry-picking merge commit: $MERGE_SHA"
+          if git cherry-pick -m 1 "$MERGE_SHA"; then
+            echo "Cherry-pick successful"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "Cherry-pick failed - conflicts detected"
+            echo "success=false" >> $GITHUB_OUTPUT
+            git cherry-pick --abort
+            exit 1
+          fi
+          
+          git push origin "$BACKPORT_BRANCH"
+          echo "branch=$BACKPORT_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        if: steps.backport.outputs.success == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          TARGET="${{ steps.extract.outputs.target_branch }}"
+          
+          gh pr create \
+            --base "$TARGET" \
+            --head "${{ steps.backport.outputs.branch }}" \
+            --title "Backport #${PR_NUMBER}: ${{ github.event.pull_request.title }}" \
+            --body "Backport of #${PR_NUMBER} to \`${TARGET}\`
+
+          Original PR: #${PR_NUMBER}
+          Original author: @${{ github.event.pull_request.user.login }}"
+
+      - name: Comment on original PR
+        if: steps.backport.outputs.success == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET="${{ steps.extract.outputs.target_branch }}"
+          
+          # Get the URL of the newly created backport PR
+          BACKPORT_PR_URL=$(gh pr view "${{ steps.backport.outputs.branch }}" --json url -q '.url')
+          
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "✅ Backport PR created for \`${TARGET}\`: ${BACKPORT_PR_URL}"
+
+      - name: Comment on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "⚠️ Automatic backport to \`${{ steps.extract.outputs.target_branch }}\` failed due to merge conflicts. Please backport manually."
