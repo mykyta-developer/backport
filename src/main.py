@@ -12,6 +12,11 @@ def calculate_sum(a: int, b: int) -> int:
     return a + b
 
 
+def calculate_product(a: int, b: int) -> int:
+    """Calculate the product of two numbers."""
+    return a * b
+
+
 def main():
     """Main entry point."""
     print(greet("World"))
