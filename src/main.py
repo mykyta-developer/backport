@@ -21,6 +21,7 @@ def main():
     """Main entry point."""
     print(greet("World"))
     print(f"2 + 3 = {calculate_sum(2, 3)}")
+    print(f"4 * 5 = {calculate_product(4, 5)}")
 
 
 if __name__ == "__main__":
